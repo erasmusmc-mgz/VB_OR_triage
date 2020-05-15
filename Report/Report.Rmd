@@ -1,0 +1,813 @@
+---
+title: "Operation Room Triage model"
+author: "A collaboration of Erasmus MC researchers"
+date: "Report created: `r format(Sys.time(), '%d %B, %Y')`, Last update model: 11/5/2020"
+output: word_document
+header-includes:
+  - \usepackage{titling}
+  - \pretitle{\begin{center}
+    \includegraphics[width=2in,height=2in]{../figures/Logo/afbeelding.jpg}\LARGE\\}
+  - \posttitle{\end{center}}
+
+---
+
+
+```{r setup, include = FALSE, warning = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, eval = TRUE, echo = FALSE, warning = FALSE, message = FALSE}
+rm(list = ls())      # clear memory (removes all the variables from the workspace)
+```
+
+
+```{r, eval = TRUE, echo = FALSE, warning = FALSE, message = FALSE}
+plotFigures <- TRUE # This is a variable that is created to adjust this markdown file to generate new figures while generating the file. Or to just take the figures that are stored in the fig folder. If that is the case set this variable to FALSE
+printTables <- TRUE
+
+plot_psa_again <- TRUE # Do we need to make the figures for the PSA again?
+
+runModel <- FALSE # Do we want to run the model again? Or just generate the report with the results? FALSE: only take the results stored in the output and figures folders, TRUE: run the model again
+
+
+```
+
+
+```{r, eval = TRUE, echo = FALSE, warnings = FALSE, message = FALSE}
+if (!require('pacman')) install.packages('pacman'); library(pacman) # use this package to conveniently install other packages
+# load (install if required) packages from CRAN
+p_load("here", "dplyr", "devtools", "scales", "ellipse", "ggplot2", "lazyeval", "igraph", "ggraph", "reshape2", "knitr", "citr", "plyr", "stats", "diagram", "EnvStats", "data.table", "gridExtra","ggrepel")   
+
+# load (install if required) packages from GitHub
+# install_github("DARTH-git/dampack", force = TRUE) #Uncomment if there is a newer version
+p_load_gh("DARTH-git/dampack") 
+
+source("../R/functions.R")       # Load general functions useful for Markov models 
+source("../R/functions_PSA.R")   # Load the PSA function  
+source("../R/model.R")           # Code of the main model
+```
+
+
+
+# Goal of this research
+The aim of this model is to support the triage for semi-elective operation within the Erasmus MC by identifying disease with the greatest potential loss by delaying surgery. 
+
+# How to read this report
+The first sections gives a summary of the research and includes the most important conclussions and gives an overview of the model assumptions. In the second section we describe the model in more detail and provide an explanation of the files used to generate the results. All the code and data is provided in the appendix and can be used to replicate the results or modify the model for a different disease or surgery type. In the final section, section 3, all model results are included. 
+
+\newpage
+
+# Section 1: Summary of the research 
+
+### Model structure 
+To generate the data that helps surgery triage, we make use of a cohort state-transition model, also often called a Markov model, with three health states. These health states are a pre-operation health state, called _Preop_, a post-operation health state, caled _Postop_, and dead _Dead_. In the _Preop_ health state patients patients in need for surgery are waiting for their surgery. While in this health state, they can die, in which case they transition to _Dead_ or they can remain in the _Preop_ health state to wait for surgery. The model structure specifies the time until surgery. After the time to waiting for surgery, all patients in the _Preop_ health state get the surgery and  transtion to _Postop_. Individual in the _Postop_ health state might die or stay in the _Postop_ health state. _Dead_ is an absorbing state. The state-transition diagram is shown below. 
+
+```{r, eval = TRUE, echo = FALSE, message = FALSE, warning = FALSE, fig.cap = "State-transition cohort model diagram." }
+### Model structure 
+state_names <- c("Preop", "Postop", "Dead")  # names of health states
+n_s         <- length(state_names)           # lenght of the health states
+
+m_P_diag <- matrix(0, nrow = n_s, ncol = n_s, dimnames = list(state_names, state_names))
+m_P_diag["Preop",  "Preop" ]  = ""
+m_P_diag["Preop",  "Postop"]  = "" 
+m_P_diag["Preop",  "Dead"  ]  = ""
+m_P_diag["Postop", "Postop"]  = ""
+m_P_diag["Postop", "Dead"  ]  = ""
+m_P_diag["Dead",   "Dead"  ]  = ""
+layout.fig <- c(2, 1)
+
+plotmat(t(m_P_diag), t(layout.fig), self.cex = 0.5, curve = 0, arr.pos = 0.8, latex = T, arr.type = "curved", relsize = 0.85, box.prop = 0.8, cex = 0.8, box.cex = 0.7, lwd = 1) # Draw state transition model
+
+png("../figures/model_str.png", width=3000, height=2000, res=600)
+plotmat(t(m_P_diag), t(layout.fig), self.cex = 0.5, curve = 0, arr.pos = 0.8, latex = T, arr.type = "curved", relsize = 0.85, box.prop = 0.8, cex = 0.8, box.cex = 0.7, lwd = 1) # Draw state transition model
+dev.off()
+```
+
+We model a hypothetical cohort of representative patients over a lifetime horizon, up to a maximun age of 100 years, using weekly cycles. Since the average age per patient population is different, the total number of cycles is different per disease as the total number of cycles is defined by `100 years - average age in years of patients`. 
+
+The cohort is modeled over several strategies. The first strategy is immediate surgery, defined as surgery within 2 weeks, vs delayed surgery modelled. Delayed surgery is model in intervals of 10 week delays after 2 weeks up to a maximum of 1 year. The main outcome of each modeled strategy is the expected quality adjusted life years (QALYs). These QALYs are calculated using a discount rate of 1.5% as recommended by the [Dutch guidelines] (https://english.zorginstituutnederland.nl/publications/reports/2016/06/16/guideline-for-economic-evaluations-in-healthcare). 
+ 
+
+## Important assumptions 
+**Model structure:**
+
+- Comorbidities are not taken into account.
+
+- We assume that all operations are succesful (e.g. reoperation is not taken into account). 
+
+- The SARS-Cov2 virus causing the pandemic situation is not modeled. 
+
+- All patients are assumed to be not infected by COVID-19. 
+
+- (Artifical) triangular distributions are used for parameter distribution, if the real distribution is not known.
+
+
+**Related to Survival/treatment effect:**
+
+- Before surgery the survival without surgery is applicable. 
+
+- After surgery the survival with surgery is applicable. 
+
+- Both survival with and without surgery is not age specific, unless specified. 
+
+- The survival after surgery is not affected by the delay of the surgery. 
+
+- The survival/effect of surgery is similar during an epidemic as compared to a normal setting (e.g. the difference of the health care system does not affect the patient outcomes).
+
+- We do not include major complications (major bleeding etc.) of surgery because we assume that these complications are rare and equally distributed among the operations. As well as evenly likely to happen in situations of immediate surgery versus delayed surgery. 
+
+- The SARS-Cov-2 virus does not affect the survival. 
+
+- For transplantation surgery, we do not assume that patients on the waiting list can enter a "crisis state", where transplantation becomes urgent (instead of semi-elective).
+
+
+**Related to quality of life:**
+
+- The QoL without surgery is constant. This means that surgery delay, which might causes extra stress, is not effecting the QoL. 
+
+- The QoL after the surgery is not influenced by the time until surgery. 
+
+- The QoL is not age specific. 
+
+- The disutiliy of recovery from a surgery is not modelled. The Qol l
+
+- No disutility of the surgery and during the time to recover from is included. 
+
+- For interventions which only aim to improve survival, the quality of life is constant (preoperative vs post-operative).
+
+- For some disease, surgery delay can cause an inreversable QoL decrease (e.g. getting blind, permanent function loss after fracture). 
+
+- *Add/check: Assumption we have with the QoL when they are equal /below/above*
+
+
+# Section 2: The model
+In this section we describe some of the steps that are done to get the results. We refer to several functions that help to run the model. These files can be found in the appendix of this report but are not shown in full detail. This reporst focusses mainly on the results. However, it is important to understand how the model is strucured and we enourage those interested to take a look at the code, replicate the results or modify the model for you own needs. 
+
+The main file to run the model is the file called `main.R`. To generate update results of the model and this report this file needs to be executed. 
+
+To get this results the following steps describe the proces conceptually:
+
+1.  **Prepair the R environment for the simulation**
+
+2.  **Load the literature data into the environment** 
+
+We load the literature data and mdify the data in order to be usded to 
+model a cohort using weekly cycles. 
+
+3.  **Model a cohort over time**
+
+A model simulates a cohort of individuals up to an average age of 100 years while keeping track of the distribution of the cohort among hte different health states _Preop_, _Postop_, _Dead_. For example, for the senerio of immediate surgery, surgery within 2 weeks, the cohort is modeled for two weeks using the survival rate before surgery. In these first two weeks of the model the individuals are at risk of dying according to the weekly probability of dying before surgery. If this happens they transition to _Dead_ otherwise they stay in _Preop_. After 2 weeks, those in the _Preop_ all get the surgery, and they make the transition to _Postop_. For the remaining cycles, they are at risk of dying according based on the survival rates after surgery. 
+
+3.1 **Calculate the QALYs**
+
+Based on the generated cohort trace, a matrix that described how the cohort is distributed among the three health states over time, the expected QALYs are calculated. 
+
+4. **Run all surgery senarios** 
+
+Repeat step 3 and 3.1 for a several times of delay for surgery. In our code we make use of a sequence of delay in steps op 10 weeks up to a maximum of 1 year. In other words, we run the model for a senareio of surgery after 2, 12, 22, 32, 42 and 52 weeks. 
+
+5. **Incorporate parameter uncertainty**
+
+Using one parameter value for each model parameter in step 3 and 4 assumes we are certain about this values. However, this is not the case and our parameters come with some uncertainty. Some to this uncertainty is described by the literature, some is based on expert opinion. In order to capture parameter uncertainty on the model outcome we have to repeat steps 3 and 4 several times using different combinations of parameter values drawn from the distribtions. Therfore, we repeat stepts 3 and 4 100 times and calculate the average expected QALYS and the distibution around it.
+
+6. **Repeat for all diseases ** 
+
+Step 3, 4 and 5 are now repeated for all diseases of interest. 
+
+
+In the paragraphs below we describe how these steps are incorporated in the code. 
+
+
+## 01 Required packages
+
+To run the model we make use of some packages which can be downloaded from CRAN as well as a package in development, called `dampack`, which we download from Github. But running the following lines of code one can prepare the computer to replicated the results. In order to install the package from GitHub. The uncommended code about the code `p_load_gh("DARTH-git/dampack")` should be used to load the package into the environment. This should only be done once.  
+```{r, eval = FALSE, echo = TRUE, warnings = FALSE, message = FALSE}
+if (!require('pacman')) install.packages('pacman'); library(pacman) # use this package to conveniently install other packages
+# load (install if required) packages from CRAN
+p_load("here", "dplyr", "devtools", "scales", "ellipse", "ggplot2", "lazyeval", "igraph", "ggraph", "reshape2", "knitr", "citr", "plyr", "stats", "diagram", "EnvStats")   
+
+# load (install if required) packages from GitHub
+# install_github("DARTH-git/dampack", force = TRUE) #Uncomment if there is a newer version
+p_load_gh("DARTH-git/dampack") 
+``` 
+
+## 02 Required functions
+
+In this section we load the functions needed for the model. The functions are stored in the _R_ folder. The file `functions.R` contains some generic functions often used in decision modeling and epidemiological research. Like a function to convert probabilities to rates and adjust a annual rate to a weekly rate as we have in our cycle. The functions in this file are mainly provided by the [DARTH workgroup](http://darthworkgroup.com). 
+
+The files `model.R` and `functions_PSA.R` includes functions specifically writen for this research. The aim of these functions is to efficiently program and to make our code easier to read and more transparent. In section XX we explain the model specific function in more detail, but we will first provide some informationabout the data used by these function. 
+
+```{r, eval = FALSE, echo = TRUE, warning = FALSE, message = FALSE}
+source("../R/functions.R")       # Load general functions useful for state-transition models 
+# Model specific functions 
+source("../R/model.R")           # Code of the main model
+source("../R/functions_PSA.R")   # Load the PSA function  
+```
+
+
+## 03 Input model parameters
+
+### 03.1 Load parameter data
+We import the the parameters found in the literature for the different populations and different interventions. These parameters are stored in the `Model parameters.xlsx` file in the _data_ folder and a list of reference can be found **ADD REFERENCE TO LITERATURE**
+
+Moreover, we import the the age- and gender-specific mortality rates in 2018, downloaded from the [CBS](www.CBS.nl). Thes age-specific mortality rates are used to model the background mortality of individuals. The disease specific mortality is added to the age-specific mortality.  
+```{r, eval = runModel, echo = FALSE, warning = FALSE, message = FALSE}
+# Load data
+param <- data.frame(readxl::read_xlsx("../data/Model parameters.xlsx"))
+cbs   <- read.csv("../data/CBS lifetable.csv", sep = ";")
+```
+
+### 03.2 Data handling
+This imported data requires some data handeling before it can be used in our model, like adjusting the survival rates and annual probabilities do die to weekly probabilities. 
+
+All model parameters have a mean estimate as well as a describtion. The data describes the type of distribution as well as the parameters required to reconstruct the distribution. As described in the data from the parameters, some of these distributions come from the literature, while others are (artefically) informed using expert opionon.
+
+### 03.3 Prepare 
+
+####03.3.1 Make PSA datset
+
+We make use of a probabilistic sensitivity analysis (PSA) to demonstrate the robustness of the model outcomes. In other words, how sensitive are our model outcomes due to the uncertainty of the input parameters. A PSA requires a dataset which contains a set of parameter values drawn from the distribution for each PSA iteration. 
+
+To generate this PSA dataset we use the function `make_psa_df` as described in the `functions_PSA.R` file in the _R_ folder. Based on the model parameter values and their corresponding distribution the function generates a dataset with parameter values of each iteration of the PSA. This PSA dataset is called `param_psa`, which stands for parameters for the psa. 
+
+The following table shows the distributions of the parameters in the PSA for one disease. Appendix 1 gives a full overview of all parameters used in the model
+
+```{r , eval = TRUE, echo = FALSE, warning = FALSE, error = FALSE, out.width='40%'}
+load("../output/psa_parameters.RData")
+param_psa <- data.table(param_psa)
+
+# Prob per week --> probability 1-year
+param_psa[param_psa$Param %in% c("Surv_tx","Surv_no_tx"), 
+          c("psa_est")]  <- 
+  1-RateToProb(
+    ProbToRate(param_psa[param_psa$Param %in% c("Surv_tx","Surv_no_tx"), 
+                                  c("psa_est")]), 
+    52)
+
+
+# Function to calculate estimate/95% CI
+aggregate_psa <- function(x){
+  #For small numbers, use 5 decimals
+  if(median(x)<0.01){
+    paste(
+                            sprintf(quantile(x,probs=0.5), fmt="%.5f"),
+                            " (",
+                            sprintf(quantile(x,probs=0.025), fmt="%.5f"),
+                            " - ",
+                            sprintf(quantile(x,probs=0.975), fmt="%.5f"),
+                            ")", sep="")
+  }else{ #Use 2 decimals in general
+    paste(
+                            sprintf(quantile(x,probs=0.5), fmt="%.2f"),
+                            " (",
+                            sprintf(quantile(x,probs=0.025), fmt="%.2f"),
+                            " - ",
+                            sprintf(quantile(x,probs=0.975), fmt="%.2f"),
+                            ")", sep="")
+
+  }
+}
+
+# Aggregate the parameters to make a nice table
+param_psa_summary <- param_psa[,.(`Estimate, 95%CI` = aggregate_psa(psa_est),
+                                  Distribution = unique(Distribution)),
+                       by =.(Label, Param, Source)]
+
+#Add units
+units <- data.frame(Param = c("Age", "QoL_no_tx", "QoL_tx", "Surv_no_tx", "Surv_tx","Tx_eff","Time_noeff_Surv","Time_noeff_QoL"),
+                    Unit = c("Years", "Utility", "Utility", "Probability per year", "Probability per year", "OR/HR/RR", "Weeks", "weeks"))
+
+param_psa_summary$Units <- units$Unit[match(param_psa_summary$Param, units$Param)]
+
+
+#knitr::kable(param_psa, caption = "The parameters with assumed distributions.") 
+
+# print the PSA data only for one disease
+# @BG I think it is better to only show one or some and not the full list - I removedd the rest to the appendix 
+knitr::kable(param_psa_summary[param_psa_summary$Label == "ASD, repair"], caption = "The parameters with assumed distributions.") 
+
+```
+
+The following figures show the input parameters of all diseases in forest plots.
+```{r, echo=FALSE, fig.width=25, fig.height=25}
+
+plot_psa <- function(psa_df, plot_prm="all", logscale=FALSE){
+  #Select parameters of interest
+  if(plot_prm=="all"){
+    subset <- rep(TRUE, nrow(psa_df))
+  }else{
+    subset <- psa_df$Param==plot_prm
+  }
+  
+  #If you want to plot on the logscale
+  if(logscale){
+    plot_psa <- ggplot(psa_df[subset,], 
+                       aes(x=Label, y=psa_est))+
+      geom_boxplot()+
+      labs(x="",y="PSA estimates")+
+      facet_wrap(~Param, scales = "free_x")+
+      scale_y_log10()+
+      coord_flip()+
+      theme_bw()+
+      theme(text=element_text(size=18))
+  }else{
+    plot_psa <- ggplot(psa_df[subset,], aes(x=Label, y=psa_est))+
+      geom_boxplot()+
+      labs(x="",y="PSA estimates")+
+      facet_wrap(~Param, scales = "free_x")+
+      coord_flip()+
+      theme_bw()+
+      theme(text=element_text(size=18))
+  }
+  return(plot_psa)
+}
+
+
+plot_psa(psa_df = param_psa[
+  !param_psa$Param%in%c("Tx_eff","Time_noeff_QoL"),])
+
+ggsave(plot_psa(psa_df = param_psa[
+  !param_psa$Param%in%c("Tx_eff","Time_noeff_QoL"),]), 
+       device="png", file="../figures/main_results/psa_est.png", 
+       width=30, height=30, units="cm")
+ggsave(plot_psa(psa_df = param_psa), 
+       device="png", file="../figures/main_results/psa_est_all.png", 
+       width=26, height=30, units="cm")
+ggsave(plot_psa(psa_df = param_psa, plot_prm = "Surv_tx"), 
+       device="png", file="../figures/main_results/psa_est_survtx.png", 
+       width=15, height=15, units="cm")
+ggsave(plot_psa(psa_df = param_psa, plot_prm = "Surv_no_tx"), 
+       device="png", file="../figures/main_results/psa_est_survnotx.png", 
+       width=15, height=15, units="cm")
+ggsave(plot_psa(psa_df = param_psa, plot_prm = "QoL_tx"), 
+       device="png", file="../figures/main_results/psa_est_qoltx.png", 
+       width=15, height=15, units="cm")
+ggsave(plot_psa(psa_df = param_psa, plot_prm = "QoL_no_tx"), 
+       device="png", file="../figures/main_results/psa_est_qolnotx.png", 
+       width=15, height=15, units="cm")
+ggsave(plot_psa(psa_df = param_psa, plot_prm = "Age"), 
+       device="png", file="../figures/main_results/psa_est_age.png", 
+       width=15, height=15, units="cm")
+ggsave(plot_psa(psa_df = param_psa, plot_prm = "Time_noeff_Surv"), 
+       device="png", file="../figures/main_results/psa_est_tnoeffsurv.png", 
+       width=15, height=15, units="cm")
+
+  
+```
+
+
+####03.3.2 Make the transition probability matrix
+
+A key component of Markov model is a stucture called the transition probability matrix that described the probabilities of transitioning from one health state to another and to remain in a health state. The functions `make_m_trans` and `trans_operation` coded in the `model.R` file in the _R_ folder generate this structure. The rows of the matrix describe the health state the individual in the cohort started from, while the colums describe where the individual transitions to. And example is shown below. In this unrealistic example, those in th _Preop_ health state have a 20% change of dying every week and a 80% probability to stay in the _Preop_ state, while after surgery, the group has a 5% change of dying every week. 
+
+```{r, eval = TRUE, echo = FALSE}
+state_names <- c("Preop", "Postop", "Dead")  # names of health states
+n_s         <- length(state_names)           # lenght of the health states
+
+m_P <- matrix(0, nrow = n_s, ncol = n_s, dimnames = list(state_names, state_names))
+m_P["Preop", "Preop"] <- 0.80
+m_P["Preop", "Dead"] <- 0.20
+m_P["Postop", "Postop"] <- 0.95
+m_P["Postop", "Dead"] <- 0.05
+m_P["Dead", "Dead"]   <- 1
+
+print(m_P)
+``` 
+
+The transition probabilities in our model are depending on the cycle in which the cohort is in. For example, for the senario in which surgery is delayed to 12 weeks, the cohort can not transition from _Preop_ to _Postop_ therefore, the probabilty to transition from _Preop_ to _Postop_ until week 12 should be 0. At week 12, the cohort is at risk of dying and the remaining cohort will get the surgery and transition to the _Postop_ health state. The "switching on and off" of the transition from _Preop_ to _Postop_ is done by the `trans_operation` function. 
+
+This means that the transition matrix is different at different cycles. Therefore, we make a transtion probabilty matrix for every cycles. In more technical terms, we add an extra dimension to the 3x3 matrix, a dimension of the number of cycles. This results in an array of transition probabilities. While running the model the transition probability matrix corresponding to the cycle is used to model what happends to the cohort. 
+
+In the `make_m_trans.R` 
+- Describe how we deal with the tumor doubling reate & how the CBS data is used in addition to the disease specific data
+
+## 04 Run the analysis
+
+Based on the conceptual algorithm as described in the beginning of this paragraph and the function defined we run the model by excecuting the `main.R` file. Add the end of the file the results are stored in the _output_ folder. These results are used to generate the figures as plotted in section 3. 
+
+The files are:
+- `res_psa.Rdata`: a dataframe including the results of the PSA
+
+- `psa_pooled.Rdata`: a dataframe including a summary of hte PSA data
+
+- `input_psa.Rdata` : The input data to make the PSA dataframe 
+
+- `psa_parameters.RData` : The parameter inputs for the PSA run
+
+## 05 Calculate model outcomes
+
+The main outcome of the model is are the expected QALYs at each time point of surgery. These values are informative, but it might be hard to interpret the effect of surgery delay. Therefore, we calculate the derivative at each time interval using the`calculateDerivative` function from the `model.R` file. This function calculated how many QALYs on average are lost per week of surgery delay within the 10 weeks interval. The more QALYs are on average lost within a week of delay the more a patient can benefit from ealy surgery. This could be a patient population with indicaition for surgery that might need to get prioroty for surgery. While a value of zero indicate that waiting for 10 more weeks within that time interval does not result in an expected loss in QALYS. This indicates that this might be a population with surgery indication can wait a little longer. The function also creates figures of these results, which are stored in the _figures_ folder
+
+
+
+# Section 3: Disease specific results
+
+In this section we describe the disease specific results in descending order of urgency.
+
+```{r, eval = TRUE, echo = FALSE, warning=FALSE, error = FALSE}
+load("../output/psa_pooled.Rdata")
+
+#Extract the right order of presentation
+order_populations <- unique(results_pooled$Label)[ 
+  order(
+    results_pooled[
+      results_pooled$delay == 52,
+      "AAC_delay_med"
+      ],
+    decreasing = TRUE
+    )
+  ]
+```
+
+
+## Main results
+The following table presents the main results of the model. The results are ordered in descening urgency.
+
+```{r, eval = TRUE, echo = FALSE, warning = FALSE, error = FALSE, width=20}
+## First, summarize the remaining QALYs for given delays
+# A matrix to store the results in
+est_ci_QALY <- matrix(nrow = length(order_populations),
+                      ncol = length(unique(results_pooled$delay)),
+                      dimnames = list(order_populations, 
+                                      unique(results_pooled$delay)))
+# Loop over the diseases, and store the QALYs (est+95% CI) in the matrix
+for(i in order_populations){
+est_ci_QALY[i,] <- paste(sprintf("%.2f",results_pooled$QALY_med[results_pooled$Label==i]),
+                         " (",
+                         sprintf("%.2f",results_pooled$QALY_lo[results_pooled$Label==i]),
+                         " - ",
+                         sprintf("%.2f",results_pooled$QALY_hi[results_pooled$Label==i]),
+                         ")", sep=""
+                         )
+                     
+}
+
+#Make the main results data.frame
+res_main <- data.frame(est_ci_QALY)
+
+#Make the colnames prettier
+colnames(res_main) <- paste("QALY, delay =",unique(results_pooled$delay),"weeks")
+
+# To store the AAC/max delay in
+res_main$`AAC/max delay` <- NA
+
+# Obtain the AAC/max (estimate +95% CI) and store in the data.frame
+for(i in order_populations){
+res_main[i,"AAC/max delay"] <- paste(sprintf("%.2f",
+                                             results_pooled$AAC_delay_med[
+                                               results_pooled$Label==i&
+                                                 results_pooled$delay==52
+                                               ]/12 #per month
+                                             ),
+                                     " (",
+                                     sprintf("%.2f",
+                                             results_pooled$AAC_delay_lo[
+                                               results_pooled$Label==i&
+                                                 results_pooled$delay==52
+                                               ]/12  #per month
+                                             ),
+                                     " - ",
+                                     sprintf("%.2f",
+                                             results_pooled$AAC_delay_hi[
+                                               results_pooled$Label==i&
+                                                 results_pooled$delay == 52
+                                               ]/12  #per month
+                                             ),
+                                     ")", sep = ""
+                                     )
+                     
+}
+
+#Delay = 999 --> No surgery
+colnames(res_main)[ncol(res_main)-1] <- c("No surgery")
+
+knitr::kable(res_main, font_size = 8)  # Print the results 
+
+write.csv2(res_main, file="../figures/main_results/main_results.csv")
+```
+
+Since the table is quite large, we also summarized the main results in figures. The following figures shows the increase in QALYs attributable to the operation.
+
+```{r,  eval = TRUE, echo = FALSE, warning = FALSE, error = FALSE, fig.width=12, fig.height=18}
+load("../output/res_psa.Rdata")
+
+df_res <- data.table(df_res)
+
+# Calculate benefit + 95% CI from psa results
+bnft <- expand.grid(Label=as.character(unique(df_res$Label)),
+                    Bnft      = NA,
+                    Bnft_lo   = NA,
+                    Bnft_hi   = NA,
+                    type      = c("LY","QALY"))
+for(p in bnft$Label){
+  # QALYs with minimal delay
+  QALY2   <- df_res[df_res$Label==p&df_res$delay==2,]$QALY
+  
+  # QALYs without surgery
+  QALY999 <- df_res[df_res$Label==p&df_res$delay==999,]$QALY
+  
+  # Calculate benefit
+  bnft[bnft$Label==p&bnft$type=="QALY","Bnft"] <- quantile(QALY2-QALY999, probs=0.5)
+  bnft[bnft$Label==p&bnft$type=="QALY","Bnft_lo"] <- quantile(QALY2-QALY999, probs=0.025)
+  bnft[bnft$Label==p&bnft$type=="QALY","Bnft_hi"] <- quantile(QALY2-QALY999, probs=0.975)
+  
+  # LYs with minimal delay
+  LY2   <- df_res[df_res$Label==p&df_res$delay==2,]$LY
+  
+  # QALYs without surgery
+  LY999 <- df_res[df_res$Label==p&df_res$delay==999,]$LY
+  
+  # Calculate benefit
+  bnft[bnft$Label==p&bnft$type=="LY","Bnft"]    <- quantile(LY2-LY999, probs=0.5)
+  bnft[bnft$Label==p&bnft$type=="LY","Bnft_lo"] <- quantile(LY2-LY999, probs=0.025)
+  bnft[bnft$Label==p&bnft$type=="LY","Bnft_hi"] <- quantile(LY2-LY999, probs=0.975)
+}
+
+#Descending order 
+bnft$Label <- factor(bnft$Label, levels=bnft$Label[order(bnft$Bnft[bnft$type=="QALY"], decreasing = FALSE)])
+bnft$type <- factor(bnft$type, levels=c("QALY","LY"))
+plot_main <- ggplot(bnft, 
+                    aes(x=Label, y=Bnft, ymin=Bnft_lo, ymax=Bnft_hi))+
+  geom_pointrange()+
+  labs(x="Population/intervention",y="Gained by surgery")+
+  theme_bw()+
+  theme(text=element_text(size=20))+
+  coord_flip()+
+  facet_wrap(~type)
+
+plot_main
+
+ggsave(plot_main, filename = "../figures/main_results/bnft.png",device = "png", width=15, height=10)
+```
+
+
+The following figure shows the loss of QALYs per week delay.
+
+```{r,  eval = TRUE, echo = FALSE, warning = FALSE, error = FALSE, fig.width=20, fig.height=18}
+
+##FIRST: QALY,
+plot.df_qaly <- results_pooled[results_pooled$delay==52,]
+plot.df_qaly$urg    <- plot.df_qaly$AAC_delay_med
+plot.df_qaly$urg_lo <- plot.df_qaly$AAC_delay_lo
+plot.df_qaly$urg_hi <- plot.df_qaly$AAC_delay_hi
+plot.df_qaly$type <- "QALY"
+
+##SECOND: LY
+plot.df_ly <- results_pooled[results_pooled$delay==52,]
+plot.df_ly$urg    <- plot.df_qaly$AAC_delay_ly_med
+plot.df_ly$urg_lo <- plot.df_qaly$AAC_delay_ly_lo
+plot.df_ly$urg_hi <- plot.df_qaly$AAC_delay_ly_hi
+plot.df_ly$type <- "LY"
+
+##Combine them
+plot.df <- rbind(plot.df_qaly, plot.df_ly)
+plot.df$Label <- factor(plot.df$Label, levels=rev(order_populations))
+
+plot.df[,c("urg","urg_lo","urg_hi")] <- 
+  plot.df[,c("urg","urg_lo","urg_hi")]/52
+
+plot.df$type <- factor(plot.df$type, levels=c("QALY","LY"))
+
+plot_main <- ggplot(plot.df, 
+                    aes(x=Label, 
+                        y=urg*52/12,     # per month
+                        ymin=urg_lo*52/12, 
+                        ymax=urg_hi*52/12))+
+  geom_pointrange()+
+  labs(x="Population/intervention",y="Loss per month")+
+  theme_bw()+
+  theme(text=element_text(size=20))+
+  coord_flip()+
+  facet_wrap(~type)
+
+plot_main
+
+ggsave(plot_main, filename = "../figures/main_results/loss_pw.png",device = "png", width=15, height=10)
+  
+```
+
+The interventions are again ordered in descending urgency. The spread around the points are 95% confidence intervals. The estimates are given for the average loss of QALYs per week.
+
+## In-depth results
+Because we need to be able to check the input and output of the model simultaneously, we will present them here. In descending order of urgency, we will display the input parameters of the model, the impact on the remaining QALYs, and the QALYs lost per week during 1 year of delay. 
+
+```{r,echo = FALSE,out.width='50%'}
+# QALY
+all_images_QALY <- vector(mode = "character" ,length = length(order_populations))
+order_populations <- as.vector(order_populations)
+
+for(i in 1:length(order_populations)){
+  p <- order_populations[i]
+  p <- gsub(" ", "_", p)
+ all_images_QALY[i] <- (paste("../figures/QALY_per_pop/",p,"_QALY.png", sep=""))
+}
+
+# # Derivative
+# all_images <- vector(mode = "character" ,length = length(order_populations))
+# order_populations <- as.vector(order_populations)
+# 
+# for(i in 1: length(order_populations)){
+#   p <- order_populations[i]
+#   p <- gsub(' ', "_", p)
+#   all_images[i] <- paste("../figures/",p,"_derivatives.png", sep = "")
+# }
+
+### IF we did not create the PSA files already, plot them now
+if(plot_psa_again){
+## Save psa data into figures
+for(d in order_populations){
+  p <- gsub(' ', "_", d)
+  png(paste("../figures/QALY_per_pop/",p,"_psa.png",sep=""), width = 1200, height=400 )
+  gridExtra::grid.table(param_psa_summary[param_psa_summary$Label==d,])
+  dev.off()
+}
+}
+
+
+# Make a vector with all the names
+all_psa <- vector(mode = "character" ,length = length(order_populations))
+order_populations <- as.vector(order_populations)
+
+for(i in 1: length(order_populations)){
+  p <- order_populations[i]
+  p <- gsub(' ', "_", p)
+  all_psa[i] <- paste("../figures/QALY_per_pop/",p,"_psa.png", sep = "")
+}
+
+
+#Combine figures into 1 vector
+all_images_m <- matrix(c(all_psa,all_images_QALY),ncol=2, byrow = FALSE) #in a matrix
+all_images_v <- c("missing")
+for(i in 1:nrow(all_images_m)) all_images_v <- c(all_images_v,all_images_m[i,1],all_images_m[i,2]) 
+all_images_v <- all_images_v[-1]
+
+
+knitr::include_graphics(all_images_v)
+
+
+
+
+```
+
+
+## Coupling with HIX data
+The data which G. Geleijnse extracted from Hix, can be used to optimize OR time. For many of the diseases, the mean duration of the operation was found. We will first couple the HIX data to our own data.
+
+```{r coupling,echo = FALSE, out.width='100%' , fig.align = "center"}
+#Load in capacity data
+cpcty  <- data.frame(readxl::read_xlsx("../data/HIX_data.xlsx"))
+key.df <- data.frame(readxl::read_xlsx("../data/Sleutellijst_hix_onzedata.xlsx"))
+
+## FOR transplantations: add the duration of the OR of the donor to the one from the receiver
+cpcty$duration_or_lo[cpcty$Hix_label=="Niertransplantatie traj ontv"] <- cpcty$duration_or_lo[cpcty$Hix_label=="Niertransplantatie traj donor"]+
+  cpcty$duration_or_lo[cpcty$Hix_label=="Niertransplantatie traj ontv"]
+cpcty$duration_or_med[cpcty$Hix_label=="Niertransplantatie traj ontv"] <- cpcty$duration_or_med[cpcty$Hix_label=="Niertransplantatie traj donor"]+
+  cpcty$duration_or_med[cpcty$Hix_label=="Niertransplantatie traj ontv"]
+cpcty$duration_or_hi[cpcty$Hix_label=="Niertransplantatie traj ontv"] <- cpcty$duration_or_hi[cpcty$Hix_label=="Niertransplantatie traj donor"]+
+  cpcty$duration_or_hi[cpcty$Hix_label=="Niertransplantatie traj ontv"]
+cpcty$duration_or_lo[cpcty$Hix_label=="Levertranspl traj ontv"] <- 
+  cpcty$duration_or_lo[cpcty$Hix_label=="Part levertranspl traj donor"]+
+  cpcty$duration_or_lo[cpcty$Hix_label=="Levertranspl traj ontv"]
+cpcty$duration_or_med[cpcty$Hix_label=="Levertranspl traj ontv"] <- 
+  cpcty$duration_or_med[cpcty$Hix_label=="Part levertranspl traj donor"]+
+  cpcty$duration_or_med[cpcty$Hix_label=="Levertranspl traj ontv"]
+cpcty$duration_or_hi[cpcty$Hix_label=="Levertranspl traj ontv"] <- 
+  cpcty$duration_or_hi[cpcty$Hix_label=="Part levertranspl traj donor"]+
+  cpcty$duration_or_hi[cpcty$Hix_label=="Levertranspl traj ontv"]
+
+#Make a nice capacity dataframe (only include populations which we have)
+res_cpc <- merge(cpcty, key.df,
+                 by.x="Hix_label", 
+                 by.y="Hix_label_1")
+res_cpc <- res_cpc[complete.cases(res_cpc[,c("Hix_label","Label")]),
+                   c("Hix_label","count",
+                     "n_ASA","mean_ASA","N_mort_30d",
+                     "n_mort","duration_or_lo","duration_or_med","duration_or_hi",
+                     "los_icu_med", 
+                     "los_icu_lo","los_icu_hi",
+                     "los_nonicu_med","los_nonicu_lo",
+                     "los_nonicu_hi",
+                     "Label")]
+
+# Make a df with capacity + results
+## First: extract results: (decrease in QALY per week/total QALY associated)
+df_urg <- with(results_pooled[results_pooled$delay==52,],
+               data.frame(Label=Label, 
+                          urg=AAC_delay_med/12, 
+                          urg_min=AAC_delay_lo/12, 
+                          urg_max=AAC_delay_hi/12)
+               )
+df_res_main <- merge(df_urg, bnft, by="Label")
+##second: merge with capacity
+df_res_main <- merge(df_res_main, res_cpc, by="Label")
+
+#Order in urgency
+df_res_main <- df_res_main[order(df_res_main$urg, decreasing = TRUE),]
+```
+
+```{r}
+cpcty_tbl <- df_res_main[df_res_main$type=="QALY",]
+cpcty_tbl$los_icu <- paste(cpcty_tbl$los_icu_med,
+                           " (",
+                           cpcty_tbl$los_icu_lo,
+                           " - ",
+                           cpcty_tbl$los_icu_hi,
+                           ")", sep = "")
+cpcty_tbl$los_nonicu <- paste(cpcty_tbl$los_nonicu_med,
+                           " (",
+                           cpcty_tbl$los_nonicu_lo,
+                           " - ",
+                           cpcty_tbl$los_nonicu_hi,
+                           ")", sep = "")
+cpcty_tbl$dur_or <- paste(cpcty_tbl$duration_or_med,
+                           " (",
+                           cpcty_tbl$duration_or_lo,
+                           " - ",
+                           cpcty_tbl$duration_or_hi,
+                           ")", sep = "")
+
+
+knitr::kable(cpcty_tbl[,c("Label",
+                            "count",
+                            "dur_or",
+                            "los_icu",
+                            "los_nonicu")])
+
+write.csv2(cpcty_tbl[,c("Label",
+                            "count",
+                            "dur_or",
+                            "los_icu",
+                            "los_nonicu")], 
+          file="../figures/main_results/hix_data.csv")
+```
+
+The table above shows the data for the investigated interventions for 3 years. 
+
+```{r,echo = FALSE, fig.width=16, fig.height=16}
+urg_cpcty <- ggplot(df_res_main[df_res_main$type=="QALY",],
+                  aes(x=los_nonicu_med, y=duration_or_med, label=Label,
+                      col=urg))+
+  geom_label_repel(box.padding   = 0.35, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50',cex=6)+
+  geom_point(aes(size=count))+
+  theme_bw()+
+  labs(col="QALY loss per month",
+       x="Median length of stay at the ward (days)",
+       y="Duration intervention (min)")+
+  scale_color_gradient(low="blue", high="red")+
+  theme(text=element_text(size=20))
+       
+urg_cpcty
+
+ggsave(urg_cpcty, file="../figures/main_results/duration_urg.png", width=40, height=30, units = "cm")
+```
+
+```{r,echo = FALSE, fig.width=16, fig.height=16}
+urg_n <- ggplot(df_res_main,
+                  aes(x=urg, y=count, label=Label))+
+  geom_point(cex=2)+
+  geom_label_repel(box.padding   = 0.35, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50')+
+  theme_bw()+
+  labs(x="QALY loss per week",
+       y="N performed")+
+  theme(text=element_text(size=18))
+       
+urg_n
+
+ggsave(urg_n, file="../figures/main_results/n_urg.png", width=40, height=30, units = "cm")
+```
+
+In the figure above, 
+
+# Acknowledgement 
+# @BG and @EK, we have to check if the list is complete 
+
+The team: 
+- The principal investigators of this projects are: R.J. Baatenburg de Jong and H.F. Lingsma
+- The research team: I.R.A. Retel Helmrich, E. van Veen, H.F. Lingsma, C.L. van Lint, S.M. Bruinsma, R.J. Baatenburg de Jong, B.Y. Gravesteijn, E.M. Krijkamp
+- The code is written by: B.Y. Gravesteijn and E.M. Krijkamp
+- For the methods and materials used for the collection of the quality of life values we like to thank J.J. van Busschbach. 
+
+We would like to acknowledge C. Verhoef, C.H. Bangma, C.M.F. Dirven, E.M. Roes, G. Geleijnse, G. Jansen van Rosendaal, H.A. Polinder - Bos, J.A. Goudzwaard,  J.J.M. Takkenberg, J.L.C.M. van Saase, M.G. van Vledder, P.J.E. Bindels,S. Sleijfer, T.W. Galema for active participation in this research. A special thanks goes to H. Karreman and C. Van der Velden - van der Graaf for the incredable amount of work they have done to proces the data. 
+
+We would like to acknowledge XXX and XXX for the survival data 
+
+XXX other names of people that helped with this research (and are not authors of the document). 
+
+For this research we made use of the template developed by the Decision Analysis in R for Technologies in Health (DARTH) workgroup: <http://darthworkgroup.com>.
+
+The notation of our code is based on the following provided framework and coding convention:
+Alarid-Escudero, F., Krijkamp, E.M., Pechlivanoglou, P. et al. A Need for Change! A Coding Framework for Improving Transparency in Decision Modeling. PharmacoEconomics 37, 1329–1339 (2019). <https://doi.org/10.1007/s40273-019-00837-x>.
+
+
+There was no funding for this research. 
+
+CONFLICTS OF INTEREST?
+
+All errors in the code are the responsibility of the authors. 
+
+
+
