@@ -214,8 +214,8 @@ plotPopulationOutcomes <- function(data, folder = "figures/", size_cm=10){
       facet_wrap(~ Label) +
       xlab("Delay (weeks)") +
       ylab("QALY") +
-      scale_y_continuous(limits = c(avg_y - 7.3,
-                                    avg_y + 7.3))+
+      scale_y_continuous(limits = c(avg_y - 10,
+                                    avg_y + 10))+
       theme_bw() +
       theme(text = element_text(size = 16), 
             strip.text = element_text(size = 16))

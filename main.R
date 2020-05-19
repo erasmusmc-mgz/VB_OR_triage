@@ -217,7 +217,7 @@ for (d in pop_names){
       df_res[df_res$iter == it & df_res$Pop == d & df_res$delay == delay[i], "LY"] <- LY
       
       # Calculate the area above the curve for QALYs 
-      area.total <- df_res[df_res$Pop == d & df_res$iter == it, ]$QALY[1] * df_res[df_res$Pop == d & df_res$iter == it, ]$delay[i]
+      area.total <- df_res[df_res$Pop == d & df_res$iter == it, ]$QALY[1] * (delay[i]-2)
       auc <- DescTools::AUC(x    = df_res[df_res$Pop == d & df_res$iter==it, ]$delay, 
                             y    = df_res[df_res$Pop == d & df_res$iter==it, ]$QALY, 
                             from = df_res[df_res$Pop == d & df_res$iter==it, ]$delay[1], 
@@ -227,20 +227,21 @@ for (d in pop_names){
       
       # Store the results
       df_res[df_res$iter==it & df_res$Pop == d & df_res$delay == delay[i], "AAC"] <- aac
-      df_res[df_res$iter==it & df_res$Pop == d & df_res$delay == delay[i], "AAC_delay"] <- aac/delay[i]
+      df_res[df_res$iter==it & df_res$Pop == d & df_res$delay == delay[i], "AAC_delay"] <- aac/(delay[i]-2)*52/12
       
       # Calculate the area above the curve for LYs 
-      area.totally <- df_res[df_res$Pop == d & df_res$iter == it, ]$LY[1] * df_res[df_res$Pop == d & df_res$iter == it, ]$delay[i]
+      area.totally <- df_res[df_res$Pop == d & df_res$iter == it, ]$LY[1] * (delay[i]-2)
       aucly <- DescTools::AUC(x    = df_res[df_res$Pop == d & df_res$iter==it, ]$delay, 
                             y    = df_res[df_res$Pop == d & df_res$iter==it, ]$LY, 
                             from = df_res[df_res$Pop == d & df_res$iter==it, ]$delay[1], 
                             to   = df_res[df_res$Pop == d & df_res$iter==it, ]$delay[i], 
                             method = "spline") # Calculate the area under the curve 
-      aacly <- area.totally - aucly # area above the curve 
+      
+      aacly <- area.totally - aucly # area above the curve
       
       # Store the results
       df_res[df_res$iter==it & df_res$Pop == d & df_res$delay == delay[i], "AAC_ly"] <- aacly
-      df_res[df_res$iter==it & df_res$Pop == d & df_res$delay == delay[i], "AAC_delay_ly"] <- aacly/delay[i]
+      df_res[df_res$iter==it & df_res$Pop == d & df_res$delay == delay[i], "AAC_delay_ly"] <- aacly/(delay[i]-2)*52/12
     }
     
     # Display simulation progress
